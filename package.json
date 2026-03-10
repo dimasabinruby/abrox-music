@@ -1,0 +1,14 @@
+{
+  "name": "abrox-music-js",
+  "version": "1.0.0",
+  "description": "Discord Music Bot with Lavalink",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.13.0",
+    "lavalink-client": "^2.1.0",
+    "dotenv": "^16.0.0"
+  }
+}
