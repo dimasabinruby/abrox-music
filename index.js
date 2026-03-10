@@ -1,73 +1,77 @@
-const { Client, GatewayIntentBits, Collection, EmbedBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } = require('discord.js');
 const { Shoukaku, Connectors } = require('shoukaku');
+const PlayerManager = require('./PlayerManager');
+const buttonHandler = require('./buttonHandler');
 require('dotenv').config();
 
 const client = new Client({
-    intents: [
-        GatewayIntentBits.Guilds,
-        GatewayIntentBits.GuildVoiceStates,
-        GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent
-    ]
+    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
 });
 
-// Lavalink Node Details
 const Nodes = [{
-    name: 'Main Node',
-    url: process.env.LAVALINK_HOST + ':' + process.env.LAVALINK_PORT,
+    name: 'Abrox-Node',
+    url: `${process.env.LAVALINK_HOST}:${process.env.LAVALINK_PORT}`,
     auth: process.env.LAVALINK_PASSWORD,
     secure: false
 }];
 
-// Initialize Shoukaku (Lavalink Manager)
 const shoukaku = new Shoukaku(new Connectors.DiscordJS(client), Nodes);
+const manager = new PlayerManager(client);
 
-shoukaku.on('error', (_, error) => console.error('Lavalink Error:', error));
-shoukaku.on('ready', (name) => console.log(`✅ Lavalink Node ${name} is connected!`));
+// Slash Command Definitions
+const commands = [
+    new SlashCommandBuilder()
+        .setName('play')
+        .setDescription('Play a song from YouTube/Spotify')
+        .addStringOption(opt => opt.setName('query').setDescription('Song name or URL').setRequired(true))
+].map(command => command.toJSON());
 
-// In-Memory Database (Replaces your server_states dictionary)
-client.serverStates = new Map();
-
-client.on('ready', () => {
-    console.log(`✅ Logged in as ${client.user.tag}!`);
-    console.log(`✅ Loaded Abrox Music UI Premium Edition (6.2)!`);
-    client.user.setActivity('/help | Premium Bot | 50+ Commands');
+client.on('ready', async () => {
+    const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
+    await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
+    console.log(`✅ Abrox Music Online | Commands Synced`);
 });
 
-// Basic Play Command Translation
+// Main Music Logic
 client.on('interactionCreate', async interaction => {
+    if (interaction.isButton()) return buttonHandler(interaction, shoukaku, manager);
     if (!interaction.isChatInputCommand()) return;
 
     if (interaction.commandName === 'play') {
         await interaction.deferReply();
-        const search = interaction.options.getString('search');
-        const voiceChannel = interaction.member.voice.channel;
+        const query = interaction.options.getString('query');
+        const state = manager.getOrCreateState(interaction.guild.id);
+        
+        let player = shoukaku.players.get(interaction.guild.id);
+        if (!player) {
+            player = await shoukaku.joinVoiceChannel({
+                guildId: interaction.guild.id,
+                channelId: interaction.member.voice.channel.id,
+                shardId: 0
+            });
 
-        if (!voiceChannel) return interaction.followup.send('❌ You need to be in a voice channel first!');
-
-        // Connect to Lavalink Player
-        const player = await shoukaku.joinVoiceChannel({
-            guildId: interaction.guild.id,
-            channelId: voiceChannel.id,
-            shardId: 0
-        });
-
-        // Search Lavalink instead of yt-dlp
-        const node = shoukaku.getNode();
-        const result = await node.rest.resolve(`ytsearch:${search}`);
-
-        if (!result || result.data.length === 0) {
-            return interaction.followup.send('❌ No results found!');
+            // Lavalink Event: Track Ends -> Play Next
+            player.on('end', async () => {
+                if (state.queue.length > 0) {
+                    const nextTrack = state.queue.shift();
+                    await player.playTrack({ track: nextTrack.encoded });
+                    await manager.updateNowPlaying(interaction, player, nextTrack);
+                }
+            });
         }
 
+        const node = shoukaku.getNode();
+        const result = await node.rest.resolve(`ytsearch:${query}`);
         const track = result.data[0];
+
+        if (player.track) {
+            state.queue.push(track);
+            return interaction.followup.send(`Queued: **${track.info.title}**`);
+        }
+
         await player.playTrack({ track: track.encoded });
-
-        const embed = new EmbedBuilder()
-            .setColor(0x5865F2)
-            .setDescription(`🎵 **Now Playing:** ${track.info.title}`);
-
-        await interaction.followup.send({ embeds: [embed] });
+        await manager.updateNowPlaying(interaction, player, track);
+        await interaction.deleteReply();
     }
 });
 
